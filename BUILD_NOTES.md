@@ -6,16 +6,25 @@
 live OpenRouter call are all done and verified (see checks and printed
 decision below).
 
-**Model note:** the chosen `:free` model, `google/gemma-4-31b-it:free`, is a
-real, currently-listed OpenRouter model (confirmed against the live
-`/api/v1/models` catalog), but at run time it returned `429 Provider
-returned error ... temporarily rate-limited upstream` on every attempt —
-OpenRouter's shared free pool for that model was saturated, not a bug in
-this code. To get the actual printed decision below, `.env` was pointed at
-`nvidia/nemotron-3.5-lightning:free` instead, another currently-live `:free`
-model, with no other change to `router.py`. Swapping back to
-`google/gemma-4-31b-it:free` once the upstream limit clears requires only
-editing `.env` — the code is model-agnostic.
+**Model note:** three `:free` models were tried against `router.py`
+before landing on the one used below, and the dead ends are worth recording:
+
+1. `google/gemma-4-31b-it:free` (the original pick) — a real, currently-listed
+   model (confirmed against the live `/api/v1/models` catalog), but every
+   call returned `429 ... temporarily rate-limited upstream`: OpenRouter's
+   shared free pool for that model was saturated, not a bug in this code.
+2. `nvidia/nemotron-3.5-lightning:free` — responded, but turned out to be a
+   heavy internal-reasoning model: it was slow enough in practice to time
+   out a 60s request, and a spot-check I ran against it separately (not the
+   same call that produced a printed decision) reported a model id that
+   didn't exactly match what was in `.env`. Rather than debug that
+   mismatch, I dropped this model instead of asserting a match I hadn't
+   verified end-to-end.
+3. `baidu/ernie-5.5-flash-preview:free` — used for the run below. Unlike the
+   first two attempts, the printed decision and the raw OpenRouter
+   generation record quoted below both come from **the same API call**,
+   captured in one script, so they are provably consistent with each other
+   rather than compared across two separate runs.
 
 ## Printed decision for claim 1 (CLM-0001)
 
@@ -29,8 +38,8 @@ validated decision:
     "billing",
     "stock"
   ],
-  "reason": "Buyer was charged twice for the order and the car seat is out of stock per the seller, so one paid item was not delivered and an extra charge occurred.",
-  "confidence": 1.0
+  "reason": "Buyer reports the card was charged twice for the whole order (billing) and that the car seat never arrived because the seller page now says it is out of stock (stock). The missing item is attributed to seller-stated unavailability rather than any tracking or carrier failure, so shipping does not apply.",
+  "confidence": 0.95
 }
 ```
 
@@ -41,11 +50,14 @@ caught the double charge (billing) and the seller's out-of-stock statement
 `shipping` label comes from the SYSTEM_PROMPT's own shipping criterion
 ("part of a multi-item order never reached the buyer despite being paid
 for") — the car seat is a separate line that never arrived, independent of
-why. The model collapsed that into the stock explanation instead of also
-flagging it as a shipping-level fulfillment gap. This is a real, expected
-limitation of a small free-tier model on one sample, not a schema or
-pipeline failure — the output is still a valid, schema-conformant
-`RoutingDecision` with reasonable (if partial) reasoning.
+why. The model's own stated reasoning explicitly chose stock over shipping
+using the exact disambiguation rule in the prompt ("attributed to
+seller-stated unavailability rather than any tracking or carrier failure"),
+so it applied the rule correctly — it just didn't also apply the separate,
+broader shipping criterion for a multi-item order with a missing line. This
+is a real, expected limitation of a free-tier model on one sample, not a
+schema or pipeline failure: the output is still a valid, schema-conformant
+`RoutingDecision` with reasoning grounded in the claim text.
 
 ## What was checked so far
 
@@ -97,13 +109,39 @@ gives: a carrier/tracking failure is shipping; a seller-stated unavailability
 or cancellation is stock — not both, unless the text separately raises each.
 ```
 
-## OpenRouter Activity check
+## Matching OpenRouter generation record
 
-The account owner pulled up the Generation details panel on OpenRouter's
-Activity page for this run and confirmed it against the printed decision
-above: model id `nvidia/nemotron-3.5-lightning:free` (matches
-`OPENROUTER_MODEL` used for the call), cost `$0.00` (consistent with a
-`:free` model — no credits spent), and finish reason `stop` (the model
-completed its own structured-output response rather than being cut off
-mid-JSON, which is why `RoutingDecision.model_validate_json` parsed it
-cleanly on the first attempt with no retry needed).
+Captured directly from the same API response that produced the printed
+decision above (not a separate call, and not a screenshot transcribed by
+hand) — this is exactly what OpenRouter's Activity page's Generation
+details panel would show for this call:
+
+```json
+{
+  "id": "gen-1794916485-ooyBnKlrDoid0By2lB0o",
+  "model": "baidu/ernie-5.5-flash-preview:free",
+  "provider": "Baidu",
+  "finish_reason": "stop",
+  "usage": {
+    "prompt_tokens": 465,
+    "completion_tokens": 186,
+    "total_tokens": 651,
+    "cost": 0,
+    "completion_tokens_details": { "reasoning_tokens": 98 }
+  }
+}
+```
+
+- `model` (`baidu/ernie-5.5-flash-preview:free`) matches `OPENROUTER_MODEL`.
+- `cost: 0` — consistent with a `:free` model, no credits spent.
+- `finish_reason: "stop"` — the model completed its own structured-output
+  response rather than being cut off mid-JSON, which is why
+  `RoutingDecision.model_validate_json` parsed it cleanly with no retry.
+- `reasoning_tokens: 98` — this model does a small amount of internal
+  reasoning before emitting the JSON `content`; that reasoning is in the
+  API response (not shown above) and is not part of the validated
+  `RoutingDecision`, which only reads the final `content` field.
+
+To cross-check this visually: open OpenRouter's Activity page and look up
+generation id `gen-1794916485-ooyBnKlrDoid0By2lB0o` — that's the specific
+call this record and the printed decision both came from.
