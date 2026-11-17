@@ -26,6 +26,51 @@ before landing on the one used below, and the dead ends are worth recording:
    captured in one script, so they are provably consistent with each other
    rather than compared across two separate runs.
 
+## Prompt rewrite: shipping and stock can both apply to one missing item
+
+The first live run (below the fold, in the commit history) returned
+`billing|stock` for CLM-0001 against a ground truth of
+`billing|shipping|stock` — it missed `shipping`. Checking the model's own
+stated reasoning against the prompt text showed this wasn't a model
+mistake: the old disambiguator (*"pick the reason the text itself
+gives... not both, unless the text separately raises each"*) explicitly
+told the model to choose one label by cause, and it followed that
+instruction correctly. The bug was in the prompt, not the model.
+
+Checked against all 15 claims, the actual rule implied by the labels is:
+shipping and stock both apply to the same missing item when it's a
+genuinely separate, distinctly-ordered product (not a bundled accessory of
+one product, and not another unit of the same SKU) **and** the text uses
+shipment-level language (a box/parcel that never arrived, a package that
+didn't include it, a delivery record that's contradicted). Both conditions
+hold for CLM-0001 (the car seat is a distinct product from the stroller,
+and the text says "only one box showed up"). They don't hold for CLM-0007
+(the missing shade is a bundled accessory of the lamp, not its own line)
+or CLM-0011 (the organizer is a distinct product, but the text only says
+"keeps getting pushed back" — no box/shipment language at all, just a
+backorder status) — both of those stay single-label, matching their
+ground truth.
+
+`SYSTEM_PROMPT` in `router.py` was rewritten accordingly:
+
+```
+A claim can need more than one specialist for the very same missing item —
+shipping and stock are not always mutually exclusive. Apply shipping when
+the text describes a shipment-level event for a genuinely separate,
+distinct product or order line (not a bundled accessory of one product,
+and not another unit of the same item): a box or parcel that never
+arrived, a package that didn't include that line, or a delivery/tracking
+record contradicted by what the buyer actually received. Apply this
+regardless of whether a reason is also given for it. Apply stock whenever
+the text attributes a shortage to the seller's own stated unavailability,
+backorder, or cancellation. When the missing piece is instead a bundled
+accessory or component of a single ordered product, or another unit within
+one line, treat shipping and stock as mutually exclusive and pick by the
+stated reason — a carrier/tracking failure is shipping, a seller-stated
+unavailability or cancellation is stock — unless the text separately raises
+both for that same item.
+```
+
 ## Printed decision for claim 1 (CLM-0001)
 
 ```
@@ -36,28 +81,21 @@ validated decision:
 {
   "specialists": [
     "billing",
+    "shipping",
     "stock"
   ],
-  "reason": "Buyer reports the card was charged twice for the whole order (billing) and that the car seat never arrived because the seller page now says it is out of stock (stock). The missing item is attributed to seller-stated unavailability rather than any tracking or carrier failure, so shipping does not apply.",
-  "confidence": 0.95
+  "reason": "The buyer reports a duplicate charge for the whole order, a missing car seat from the delivered box, and the seller page stating the car seat is out of stock.",
+  "confidence": 0.98
 }
 ```
 
-**How this compares to `label_specialists`:** ground truth is
-`billing|shipping|stock`; the model returned `billing|stock` — it correctly
-caught the double charge (billing) and the seller's out-of-stock statement
-(stock), but missed `shipping`. Per `ROUTING_ANALYSIS.md`, CLM-0001's
-`shipping` label comes from the SYSTEM_PROMPT's own shipping criterion
-("part of a multi-item order never reached the buyer despite being paid
-for") — the car seat is a separate line that never arrived, independent of
-why. The model's own stated reasoning explicitly chose stock over shipping
-using the exact disambiguation rule in the prompt ("attributed to
-seller-stated unavailability rather than any tracking or carrier failure"),
-so it applied the rule correctly — it just didn't also apply the separate,
-broader shipping criterion for a multi-item order with a missing line. This
-is a real, expected limitation of a free-tier model on one sample, not a
-schema or pipeline failure: the output is still a valid, schema-conformant
-`RoutingDecision` with reasoning grounded in the claim text.
+**How this compares to `label_specialists`:** matches exactly —
+`billing|shipping|stock` == `billing|shipping|stock`. The model's reasoning
+on this run (captured in full in the matching generation record below)
+explicitly named the car seat as "a distinct product line (separate from
+the stroller)... not a bundled accessory or another unit of the stroller,"
+which is the exact condition the rewritten rule hinges on — it isn't just
+landing on the right labels by chance.
 
 ## What was checked so far
 
@@ -77,15 +115,18 @@ schema or pipeline failure: the output is still a valid, schema-conformant
   routing label (what the buyer's text raises), not a verified-outcome label
   — CLM-0015 has all three specialists listed even though every allegation
   turns out false on investigation, since routing happens before
-  investigation. That analysis surfaced two gaps in the original prompt,
-  now fixed in `router.py`: (1) a disclaimed/unrelated mention (CLM-0010
-  mentions "out of stock" but says "that is not what I ordered") must not
-  add a specialist, and (2) shipping vs. stock for a missing item must
-  follow the reason the text itself gives (carrier failure vs. seller-stated
-  unavailability), not just the fact that something didn't arrive
-  (CLM-0007).
+  investigation.
+- That analysis led to two rounds of `SYSTEM_PROMPT` fixes, both verified
+  against a live run afterward: (1) a disclaimed/unrelated mention
+  (CLM-0010 mentions "out of stock" but says "that is not what I ordered")
+  must not add a specialist; (2) shipping and stock can both apply to the
+  same missing item — see "Prompt rewrite" above for the full rule and why
+  the first version of this fix (pick one by cause, never both) was itself
+  wrong on CLM-0001.
 
 ## Key system-prompt excerpt (router.py)
+
+The three label definitions, unchanged since the first commit:
 
 ```
 - billing: the claim describes a payment problem — duplicate/double charges,
@@ -97,17 +138,11 @@ schema or pipeline failure: the output is still a valid, schema-conformant
 - stock: the claim describes an inventory problem — an item the buyer paid
   for is out of stock, oversold, backordered with no date, or was canceled
   by the seller because it could not be supplied.
-
-A single claim can raise more than one of these at once...
-
-Ignore any topic the buyer explicitly flags as unrelated to their own order
-(e.g. "but that is not what I ordered") — a specialist only applies to the
-buyer's actual claimed item(s), not to anything merely mentioned in passing.
-
-When an item is missing from the order, pick the reason the text itself
-gives: a carrier/tracking failure is shipping; a seller-stated unavailability
-or cancellation is stock — not both, unless the text separately raises each.
 ```
+
+Plus the disclaimed-mention rule and the additive shipping/stock rule
+quoted in full under "Prompt rewrite" above — that's the current,
+complete `SYSTEM_PROMPT` in `router.py`.
 
 ## Matching OpenRouter generation record
 
@@ -118,16 +153,16 @@ details panel would show for this call:
 
 ```json
 {
-  "id": "gen-1794916485-ooyBnKlrDoid0By2lB0o",
+  "id": "gen-1794925082-fEVtSv3FSauBOnNj1BbN",
   "model": "baidu/ernie-5.5-flash-preview:free",
   "provider": "Baidu",
   "finish_reason": "stop",
   "usage": {
-    "prompt_tokens": 465,
-    "completion_tokens": 186,
-    "total_tokens": 651,
+    "prompt_tokens": 627,
+    "completion_tokens": 579,
+    "total_tokens": 1206,
     "cost": 0,
-    "completion_tokens_details": { "reasoning_tokens": 98 }
+    "completion_tokens_details": { "reasoning_tokens": 506 }
   }
 }
 ```
@@ -137,11 +172,14 @@ details panel would show for this call:
 - `finish_reason: "stop"` — the model completed its own structured-output
   response rather than being cut off mid-JSON, which is why
   `RoutingDecision.model_validate_json` parsed it cleanly with no retry.
-- `reasoning_tokens: 98` — this model does a small amount of internal
-  reasoning before emitting the JSON `content`; that reasoning is in the
-  API response (not shown above) and is not part of the validated
-  `RoutingDecision`, which only reads the final `content` field.
+- `reasoning_tokens: 506` — the rewritten prompt is longer and asks the
+  model to weigh two conditions (separate product? shipment-level
+  language?) instead of one, so this run did noticeably more internal
+  reasoning than the pre-rewrite run (98 tokens) before emitting the JSON
+  `content`; that reasoning is in the API response (not shown above) and
+  is not part of the validated `RoutingDecision`, which only reads the
+  final `content` field.
 
 To cross-check this visually: open OpenRouter's Activity page and look up
-generation id `gen-1794916485-ooyBnKlrDoid0By2lB0o` — that's the specific
+generation id `gen-1794925082-fEVtSv3FSauBOnNj1BbN` — that's the specific
 call this record and the printed decision both came from.

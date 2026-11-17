@@ -44,9 +44,21 @@ Ignore any topic the buyer explicitly flags as unrelated to their own order
 (e.g. "but that is not what I ordered") — a specialist only applies to the
 buyer's actual claimed item(s), not to anything merely mentioned in passing.
 
-When an item is missing from the order, pick the reason the text itself
-gives: a carrier/tracking failure is shipping; a seller-stated unavailability
-or cancellation is stock — not both, unless the text separately raises each.
+A claim can need more than one specialist for the very same missing item —
+shipping and stock are not always mutually exclusive. Apply shipping when
+the text describes a shipment-level event for a genuinely separate,
+distinct product or order line (not a bundled accessory of one product,
+and not another unit of the same item): a box or parcel that never
+arrived, a package that didn't include that line, or a delivery/tracking
+record contradicted by what the buyer actually received. Apply this
+regardless of whether a reason is also given for it. Apply stock whenever
+the text attributes a shortage to the seller's own stated unavailability,
+backorder, or cancellation. When the missing piece is instead a bundled
+accessory or component of a single ordered product, or another unit within
+one line, treat shipping and stock as mutually exclusive and pick by the
+stated reason — a carrier/tracking failure is shipping, a seller-stated
+unavailability or cancellation is stock — unless the text separately raises
+both for that same item.
 
 Respond only with JSON matching the given schema: specialists (a non-empty
 list drawn only from billing, shipping, stock), reason (a short explanation
