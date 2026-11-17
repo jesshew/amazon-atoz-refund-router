@@ -40,6 +40,14 @@ A single claim can raise more than one of these at once (for example, a
 duplicate charge AND a missing item from a stock shortage). Pick every
 label that genuinely applies, and never invent a fourth category.
 
+Ignore any topic the buyer explicitly flags as unrelated to their own order
+(e.g. "but that is not what I ordered") — a specialist only applies to the
+buyer's actual claimed item(s), not to anything merely mentioned in passing.
+
+When an item is missing from the order, pick the reason the text itself
+gives: a carrier/tracking failure is shipping; a seller-stated unavailability
+or cancellation is stock — not both, unless the text separately raises each.
+
 Respond only with JSON matching the given schema: specialists (a non-empty
 list drawn only from billing, shipping, stock), reason (a short explanation
 grounded in the claim text), and confidence (a float from 0 to 1)."""
