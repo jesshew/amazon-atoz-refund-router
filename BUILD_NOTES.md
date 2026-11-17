@@ -97,9 +97,13 @@ gives: a carrier/tracking failure is shipping; a seller-stated unavailability
 or cancellation is stock — not both, unless the text separately raises each.
 ```
 
-## Left for the account owner to do
+## OpenRouter Activity check
 
-- [ ] Screenshot the OpenRouter Activity page for this run, showing model id
-      `nvidia/nemotron-3.5-lightning:free` (that page is tied to the account
-      that owns the key, so it has to come from the key holder's own browser
-      session, not from this environment)
+The account owner pulled up the Generation details panel on OpenRouter's
+Activity page for this run and confirmed it against the printed decision
+above: model id `nvidia/nemotron-3.5-lightning:free` (matches
+`OPENROUTER_MODEL` used for the call), cost `$0.00` (consistent with a
+`:free` model — no credits spent), and finish reason `stop` (the model
+completed its own structured-output response rather than being cut off
+mid-JSON, which is why `RoutingDecision.model_validate_json` parsed it
+cleanly on the first attempt with no retry needed).
