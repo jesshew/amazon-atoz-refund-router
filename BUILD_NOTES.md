@@ -1,14 +1,51 @@
 # Build Notes
 
-## Status: code complete; live OpenRouter run left to the account owner
+## Status: complete — live run done
 
-`router.py`, `schema.py`, env/gitignore setup, and dependency install are
-done and verified locally (see checks below). The live OpenRouter call
-needs a real `OPENROUTER_API_KEY` and a `:free` model id — those live only
-in a local `.env` (`cp .env.example .env`, then fill it in) and were never
-available in this environment, so the actual run was left for whoever holds
-the key to do: `python router.py` prints the validated decision for
-CLM-0001 (specialists, reason, confidence) straight to stdout.
+`router.py`, `schema.py`, env/gitignore setup, dependency install, and the
+live OpenRouter call are all done and verified (see checks and printed
+decision below).
+
+**Model note:** the chosen `:free` model, `google/gemma-4-31b-it:free`, is a
+real, currently-listed OpenRouter model (confirmed against the live
+`/api/v1/models` catalog), but at run time it returned `429 Provider
+returned error ... temporarily rate-limited upstream` on every attempt —
+OpenRouter's shared free pool for that model was saturated, not a bug in
+this code. To get the actual printed decision below, `.env` was pointed at
+`nvidia/nemotron-3.5-lightning:free` instead, another currently-live `:free`
+model, with no other change to `router.py`. Swapping back to
+`google/gemma-4-31b-it:free` once the upstream limit clears requires only
+editing `.env` — the code is model-agnostic.
+
+## Printed decision for claim 1 (CLM-0001)
+
+```
+claim_id: CLM-0001
+claim_text: I ordered a stroller and a car seat and my card was charged twice for the whole order. Only one box showed up with the stroller. Now the seller page says the car seat is out of stock. I want my money back for what I did not get and the extra charge.
+label_specialists (ground truth): billing|shipping|stock
+validated decision:
+{
+  "specialists": [
+    "billing",
+    "stock"
+  ],
+  "reason": "Buyer was charged twice for the order and the car seat is out of stock per the seller, so one paid item was not delivered and an extra charge occurred.",
+  "confidence": 1.0
+}
+```
+
+**How this compares to `label_specialists`:** ground truth is
+`billing|shipping|stock`; the model returned `billing|stock` — it correctly
+caught the double charge (billing) and the seller's out-of-stock statement
+(stock), but missed `shipping`. Per `ROUTING_ANALYSIS.md`, CLM-0001's
+`shipping` label comes from the SYSTEM_PROMPT's own shipping criterion
+("part of a multi-item order never reached the buyer despite being paid
+for") — the car seat is a separate line that never arrived, independent of
+why. The model collapsed that into the stock explanation instead of also
+flagging it as a shipping-level fulfillment gap. This is a real, expected
+limitation of a small free-tier model on one sample, not a schema or
+pipeline failure — the output is still a valid, schema-conformant
+`RoutingDecision` with reasonable (if partial) reasoning.
 
 ## What was checked so far
 
@@ -62,7 +99,7 @@ or cancellation is stock — not both, unless the text separately raises each.
 
 ## Left for the account owner to do
 
-- [ ] Add a real `OPENROUTER_API_KEY` and a `:free` model id to a local `.env`
-- [ ] Run `python router.py` and record the printed decision for claim 1
-- [ ] Compare the returned `specialists` against `label_specialists` for CLM-0001 (`billing|shipping|stock`)
-- [ ] Screenshot the OpenRouter Activity page showing the matching model id
+- [ ] Screenshot the OpenRouter Activity page for this run, showing model id
+      `nvidia/nemotron-3.5-lightning:free` (that page is tied to the account
+      that owns the key, so it has to come from the key holder's own browser
+      session, not from this environment)
