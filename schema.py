@@ -4,7 +4,7 @@ Only billing, shipping, and stock are valid specialists. A claim may need
 more than one (e.g. a claim can be both a billing and a stock issue), so
 `specialists` is a non-empty list rather than a single value.
 """
-from typing import List, Literal
+from typing import Dict, List, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -26,3 +26,29 @@ class RoutingDecision(BaseModel):
         if len(set(value)) != len(value):
             raise ValueError("specialists must not contain duplicates")
         return value
+
+
+class SpecialistFinding(BaseModel):
+    specialist: Specialist
+    found: bool
+    rows: List[dict]
+    note: str
+
+
+class EscalationFlags(BaseModel):
+    missing_record: bool = False
+    low_confidence: bool = False
+    contradicts_billing: bool = False
+    contradicts_shipping: bool = False
+    contradicts_stock: bool = False
+
+
+class ClaimResolution(BaseModel):
+    claim_id: str
+    order_id: str
+    specialists_consulted: List[Specialist]
+    findings: Dict[str, SpecialistFinding]
+    router_confidence: float
+    escalation: EscalationFlags
+    escalate_to_human: bool
+    human_review_reason: str
