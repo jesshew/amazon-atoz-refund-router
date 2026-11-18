@@ -183,3 +183,157 @@ details panel would show for this call:
 To cross-check this visually: open OpenRouter's Activity page and look up
 generation id `gen-1794925082-fEVtSv3FSauBOnNj1BbN` — that's the specific
 call this record and the printed decision both came from.
+
+---
+
+# Stage 2: LangGraph claims graph (router → specialist tools → merge → human-review)
+
+A single LLM call picking labels isn't a graph. This stage adds a real
+`StateGraph` (`claims_graph.py`): `router_node` first, then a conditional
+fan-out to whichever of `billing_node`/`shipping_node`/`stock_node` the
+router actually picked (a billing-only claim never touches the other two),
+converging on `merge_node`, then `human_review_node`.
+
+## Data note carried over from planning
+
+The 15 labeled claims and the new `Amazon Order Line Records: Payment,
+Tracking and Stock.csv` share **zero overlapping `order_id`s** — verified
+by a direct set-diff of both columns before any code was written. Per
+explicit instruction, these are two separate datasets, not reconciled or
+faked into matching. Consequence, confirmed below: every specialist tool
+call against any of the 15 labeled claims correctly returns "no record
+found." That's the honest, expected result, not a bug.
+
+## What each specialist owns
+
+- **billing** (`billing_tool`) — owns `charge_count`, `amount_charged`,
+  `payment_status` on the matched order lines: whether the buyer was
+  actually charged more than once, and whether a charge actually settled.
+- **shipping** (`shipping_tool`) — owns `carrier`, `tracking_number`,
+  `package_status`, `last_scan_datetime`, `delivered_date`: whether a line
+  item was actually delivered, lost, or still in transit.
+- **stock** (`stock_tool`) — owns `stock_on_hand`, `stock_status`,
+  `restock_date`: whether a line item is actually unavailable, and when
+  (if ever) it's expected back.
+
+Each tool (`tools.py`) re-reads the order-line-records CSV fresh on every
+call — no caching, no hardcoded data — and returns every row matching the
+claim's `order_id`, or a `ToolResult(found=False, rows=[], note="no record
+found for order_id '...' in the order-line-records file")` when there's no
+match. It never raises on a miss; only a genuinely deleted/missing CSV
+file raises `FileNotFoundError`, which is correct — that's a real setup
+failure, not a "no record" case.
+
+## Human-review escalation rule (concrete, not "unclear cases")
+
+`merge_node` (`claims_graph.py`) sets `escalate_to_human = True` whenever
+**any** of these fire, each using real field names, not vague language:
+
+1. **`missing_record`** — any specialist the router actually consulted got
+   `found=False` from its tool. True for all 15 labeled claims given the
+   confirmed zero `order_id` overlap — the expected, documented case.
+2. **`low_confidence`** — `router_confidence < 0.70` (`CONFIDENCE_ESCALATION_THRESHOLD`
+   in `claims_graph.py`). Picked as an explainable round cutoff, not
+   statistically tuned on 15 samples — a deliberate starting point, stated
+   as such rather than dressed up as derived.
+3. **`contradicts_billing`** — claim text alleges a duplicate charge
+   ("charged twice", "two charges", "double charge", "duplicate charge")
+   but every matched row shows `charge_count <= 1`.
+4. **`contradicts_shipping`** — claim text alleges non-delivery ("never
+   arrived", "nothing arrived", "never reached", etc.) but a matched row
+   shows `package_status == "Delivered"` with a non-empty `delivered_date`.
+5. **`contradicts_stock`** — claim text alleges unavailability ("out of
+   stock", "sold out", "backorder", etc.) but a matched row shows
+   `stock_status == "In Stock"`.
+
+`human_review_reason` names exactly which condition(s) fired with
+specifics, e.g. `"no record found for: billing, shipping, stock (order_id
+114-3941689-8772232 not present in order-line-records file)"` — never a
+vague string. Conditions 3-5 can't fire on any of the 15 real claims (no
+record is ever found for them to contradict), so they're proven correct
+with synthetic row fixtures in `tests/test_claims_graph.py` instead,
+clearly commented as synthetic.
+
+## Why `tool_results` needed a reducer
+
+`ClaimState.tool_results` is typed `Annotated[dict, operator.or_]`, not a
+plain `dict`. LangGraph's Pregel engine runs every node scheduled in the
+same superstep in parallel (e.g. a `shipping|stock` claim fires both nodes
+at once) and raises `InvalidUpdateError` if two of them write the same
+state key with no reducer — it won't guess which write should win. Each
+specialist node returns only its own single key (e.g.
+`{"tool_results": {"billing": ...}}`), so `operator.or_` (dict union) is
+safe regardless of execution order. Verified empirically against the
+installed `langgraph==1.2.22`: a conditional-edge function returning a
+plain `list[str]` of node names does fan out to all of them in one
+superstep, unrouted nodes never run, and `merge_node` fires exactly once
+after all fanned-out nodes finish — the `Send`-object fallback mentioned in
+planning wasn't needed.
+
+## pytest output (64 passed, reproduced independently — not just pasted from the build)
+
+```
+$ source .venv/bin/activate && python -m pytest tests/ -q
+................................................................         [100%]
+64 passed in 0.19s
+```
+
+45 of those are `test_tools.py`'s parametrized negative-path check (3
+tools × 15 claims, asserting the correct graceful "no record" result), 3
+are the positive-path guard (same tools against a real order-line-records
+`order_id`, proving a tool can actually find rows), and the rest are
+`test_claims_graph.py`'s escalation-rule unit tests plus one test that
+monkeypatches `router.route_claim` to a fixed billing-only decision and
+asserts the compiled graph's `tool_results` contains *only* the `"billing"`
+key — proving the fan-out skips unrouted specialists without a live API
+call.
+
+## Three-claim live demo (requirement 5)
+
+Picked directly from real `label_specialists` to hit different fan-out
+widths: **CLM-0002** (`billing` only), **CLM-0013** (`shipping|stock`),
+**CLM-0001** (`billing|shipping|stock`). Ran twice — once by the
+implementing agent, once independently by me afterward — same model
+(`baidu/ernie-5.5-flash-preview:free`), same `temperature=0`:
+
+| claim | ground truth | agent's run | my independent rerun |
+|---|---|---|---|
+| CLM-0002 | `billing` | `billing` | `billing` |
+| CLM-0013 | `shipping\|stock` | `shipping` only (missed `stock`) | `shipping\|stock` (exact match) |
+| CLM-0001 | `billing\|shipping\|stock` | `billing\|shipping\|stock` | `billing\|shipping\|stock` |
+
+Worth being honest about: the *same* model and the *same* `temperature=0`
+gave two different answers for CLM-0013 across the two runs — real output
+variance from a "reasoning" free-tier model, not a code bug (the graph
+structure, tool-call count, and escalation logic were identical and
+correct in both runs; only the router's own label set differed). My
+independent rerun showed specialist tool calls made, per claim: 1
+(CLM-0002), 2 (CLM-0013), 3 (CLM-0001) — confirming the fan-out width
+genuinely tracks the router's decision on live data, not just the
+monkeypatched unit test. All three escalate to human review purely via
+`missing_record` (expected, given the confirmed zero-overlap data) —
+`escalate_to_human: True` for all three, with `human_review_reason` naming
+exactly which specialists had no record and the real `order_id`. Full
+per-claim output (router decision, every tool call, final
+`ClaimResolution`, final status) is reproducible via
+`python demo_claims_graph.py`.
+
+## What was accepted, changed, or rejected
+
+- **Accepted as-is**: the planned `Annotated[dict, operator.or_]` reducer,
+  the conditional-edge fan-out via a plain `list[str]` return (no `Send`
+  fallback needed on `langgraph==1.2.22`), and the three concrete
+  contradiction rules.
+- **Changed**: `requirements.txt` also gained `pytest>=9.2`, which wasn't
+  in the original plan — needed to actually run the test suite and
+  omitted from the first stage since no tests existed yet.
+- **Rejected/not attempted**: fabricating claim text to force a data match
+  between the two CSVs, so the demo could show a "found" tool result.
+  Per explicit instruction, the two datasets stay separate and the
+  honest "no record" outcome is what's documented, not engineered around.
+
+## Prompt excerpt given to the implementing agent
+
+> `missing_record`: any *consulted* specialist's tool returned `found=False`. (True for all 15 real claims — documented as the expected, correct outcome.)
+> `low_confidence`: `routing["confidence"] < 0.70` (documented in build notes as a deliberate starting threshold, not statistically tuned on 15 samples).
+> `contradicts_billing`/`contradicts_shipping`/`contradicts_stock`: a found record's fields actually contradict the claim text... These can't fire on the 15 real claims (no record is ever found) — proven instead with synthetic row fixtures in unit tests, clearly labeled as synthetic.
