@@ -74,19 +74,67 @@ def low_confidence(confidence: float) -> bool:
     return confidence < CONFIDENCE_ESCALATION_THRESHOLD
 
 
+DUPLICATE_CHARGE_PHRASES = ["charged twice", "two charges", "double charge", "duplicate charge"]
+NON_DELIVERY_PHRASES = [
+    "never arrived",
+    "nothing arrived",
+    "never reached",
+    "did not arrive",
+    "never showed up",
+    "never turned up",
+]
+UNAVAILABILITY_PHRASES = [
+    "out of stock",
+    "sold out",
+    "no longer available",
+    "unavailable",
+    "backorder",
+    "oversold",
+]
+
+
 def contradicts_billing(claim_text: str, finding: dict) -> bool:
-    # TODO (next slice): implement the duplicate-charge contradiction check.
-    return False
+    """True if the claim alleges a duplicate charge but every matched
+    order line shows charge_count <= 1 (i.e. nothing actually double-charged).
+    """
+    if not finding.get("found"):
+        return False
+    text = claim_text.lower()
+    if not any(phrase in text for phrase in DUPLICATE_CHARGE_PHRASES):
+        return False
+    rows = finding["rows"]
+    if not rows:
+        return False
+    return all(int(row["charge_count"]) <= 1 for row in rows)
 
 
 def contradicts_shipping(claim_text: str, finding: dict) -> bool:
-    # TODO (next slice): implement the non-delivery contradiction check.
-    return False
+    """True if the claim alleges non-delivery but some matched order line
+    is marked Delivered with a non-empty delivered_date.
+    """
+    if not finding.get("found"):
+        return False
+    text = claim_text.lower()
+    if not any(phrase in text for phrase in NON_DELIVERY_PHRASES):
+        return False
+    rows = finding["rows"]
+    return any(
+        row["package_status"] == "Delivered" and bool(row.get("delivered_date"))
+        for row in rows
+    )
 
 
 def contradicts_stock(claim_text: str, finding: dict) -> bool:
-    # TODO (next slice): implement the unavailability contradiction check.
-    return False
+    """True if the claim alleges unavailability but some matched order
+    line shows stock_status == "In Stock".
+    """
+    if not finding.get("found"):
+        return False
+    text = claim_text.lower()
+    if not any(phrase in text for phrase in UNAVAILABILITY_PHRASES):
+        return False
+    rows = finding["rows"]
+    return any(row["stock_status"] == "In Stock" for row in rows)
 
 
 def merge_node(state: ClaimState) -> dict:
